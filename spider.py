@@ -38,29 +38,49 @@ class BossSpider:
         try:
             update_time = update_time.strip().lower()
             
-            # 直接符合条件的时间格式
-            if any(x in update_time for x in ['刚刚活跃', '今天活跃', '小时内活跃']):
+            # 1. 直接符合条件的时间格式
+            instant_patterns = [
+                '刚刚活跃', '今天活跃', '今日活跃',
+                '小时内活跃', '分钟前活跃'
+            ]
+            if any(x in update_time for x in instant_patterns):
+                print(f"时间符合条件(即时): {update_time}")
                 return True
             
-            # 处理"X日内活跃"
+            # 2. 处理"X日内活跃"
             if '日内活跃' in update_time:
                 days = int(update_time.replace('日内活跃', ''))
-                return days <= Config.DAYS_LIMIT
+                is_valid = days <= Config.DAYS_LIMIT
+                print(f"时间{'' if is_valid else '不'}符合条件(X日内): {update_time}")
+                return is_valid
             
-            # 处理"本周活跃"
+            # 3. 处理"本周活跃"
             if '本周活跃' in update_time:
-                return True  # 本周内都算符合条件
+                print(f"时间符合条件(本周): {update_time}")
+                return True
             
-            # 处理"X周内活跃"
+            # 4. 处理"X周内活跃"
             if '周内活跃' in update_time:
                 weeks = int(update_time.replace('周内活跃', ''))
-                return weeks * 7 <= Config.DAYS_LIMIT
+                is_valid = weeks * 7 <= Config.DAYS_LIMIT
+                print(f"时间{'' if is_valid else '不'}符合条件(X周内): {update_time}")
+                return is_valid
             
-            # 处理"本月活跃"/"近半年活跃"等
-            if any(x in update_time for x in ['本月活跃', '月内活跃', '半年活跃', '年活跃']):
-                return False  # 超过一周的都不符合条件
+            # 5. 处理超期的时间格式
+            expired_patterns = [
+                '本月活跃', '月内活跃', '半年活跃', '年活跃',
+                '月前活跃', '半年前活跃', '年前活跃'
+            ]
+            if any(x in update_time for x in expired_patterns):
+                print(f"时间不符合条件(超期): {update_time}")
+                return False
             
-            print(f"未识别的时间格式: {update_time}")
+            # 6. 处理其他可能的时间格式
+            if '活跃' in update_time:
+                print(f"未识别的活跃时间格式: {update_time}")
+                return False
+            
+            print(f"完全未识别的时间格式: {update_time}")
             return False
             
         except Exception as e:
@@ -69,35 +89,41 @@ class BossSpider:
 
     def _check_job_conditions(self, detail_text, title, update_time):
         """检查职位是否满足条件"""
-        detail_lower = detail_text.lower()
-        
         # 1. 检查更新时间
         if not self._is_within_days(update_time):
             print(f"更新时间超过{Config.DAYS_LIMIT}天，跳过: {title}")
             return None
         
-        # 2. 检查是否包含不满足条件的关键词
-        found_reject_keywords = []
-        for keyword in self.reject_keywords:
-            if keyword in detail_lower:
-                found_reject_keywords.append(keyword)
-        
-        if found_reject_keywords:
-            print(f"发现不满足条件的关键词: {', '.join(found_reject_keywords)}")
+        # 2. 从job-detail-section获取工作信息
+        try:
+            detail_lower = detail_text.lower()
+            
+            # 检查是否包含不满足条件的关键词
+            found_reject_keywords = []
+            for keyword in self.reject_keywords:
+                if keyword in detail_lower:
+                    found_reject_keywords.append(keyword)
+            
+            if found_reject_keywords:
+                print(f"发现不满足条件的关键词: {', '.join(found_reject_keywords)}")
+                return None
+            
+            # 检查是否包含满足条件的关键词
+            found_accept_keywords = []
+            for keyword in self.accept_keywords:
+                if keyword in detail_lower:
+                    found_accept_keywords.append(keyword)
+            
+            if not found_accept_keywords:
+                print(f"未找到任何满足条件的关键词")
+                return None
+            
+            # 返回匹配到的关键词
+            return found_accept_keywords
+            
+        except Exception as e:
+            print(f"检查职位条件出错: {e}")
             return None
-        
-        # 3. 检查是否包含满足条件的关键词
-        found_accept_keywords = []
-        for keyword in self.accept_keywords:
-            if keyword in detail_lower:
-                found_accept_keywords.append(keyword)
-        
-        if not found_accept_keywords:
-            print(f"未找到任何满足条件的关键词")
-            return None
-        
-        # 返回匹配到的关键词
-        return found_accept_keywords
 
     def start(self):
         with sync_playwright() as p:
@@ -106,9 +132,9 @@ class BossSpider:
             page = context.new_page()
             
             try:
-                # 访问搜索页面
+                # 访问搜索页面，添加工作类型参数
                 encoded_keyword = self.keyword.replace(' ', '%20')
-                search_url = f"{Config.BASE_URL}/web/geek/job?query={encoded_keyword}&city=100010000"
+                search_url = f"{Config.BASE_URL}/web/geek/job?query={encoded_keyword}&city=100010000&jobType=1903"
                 
                 # 修改加载策略
                 print("正在访问搜索页面...")
@@ -177,39 +203,34 @@ class BossSpider:
                             new_page.wait_for_selector('.job-detail', timeout=20000)
                             time.sleep(1)
                             
-                            # 从详情页获取更新时间
+                            # 获取更新时间
+                            update_time = None
                             update_selectors = [
                                 '.job-detail .time',
                                 '.detail-content .time',
                                 '.update-time',
-                                'span[class*="time"]',
-                                '.job-status .time',
-                                '.job-detail .status-time'
+                                'span[class*="time"]'
                             ]
-
-                            update_time = None
+                            
                             for selector in update_selectors:
-                                try:
-                                    element = new_page.query_selector(selector)
-                                    if element:
-                                        update_time = element.inner_text().strip()
-                                        if any(keyword in update_time for keyword in ['活跃', '发布', '更新']):
-                                            print(f"找到更新时间: {update_time}")
-                                            break
-                                except:
-                                    continue
-
+                                element = new_page.query_selector(selector)
+                                if element:
+                                    update_time = element.inner_text().strip()
+                                    if any(keyword in update_time for keyword in ['活跃', '发布', '更新']):
+                                        print(f"找到更新时间: {update_time}")
+                                        break
+                            
                             if not update_time:
                                 print(f"未找到更新时间，跳过: {title}")
                                 continue
                             
-                            detail_element = (new_page.query_selector('.job-detail') or 
-                                            new_page.query_selector('.detail-content'))
-                            if not detail_element:
-                                print(f"未找到职位详情，跳过: {title}")
+                            # 获取职位详情信息
+                            detail_section = new_page.query_selector('.job-detail-section')
+                            if not detail_section:
+                                print(f"未找到职位详情section，跳过: {title}")
                                 continue
                             
-                            detail_text = detail_element.inner_text()
+                            detail_text = detail_section.inner_text()
                             
                             # 检查职位条件
                             matched_keywords = self._check_job_conditions(detail_text, title, update_time)
@@ -229,7 +250,7 @@ class BossSpider:
                             time.sleep(1)
                     
                     except Exception as e:
-                        print(f"处理职位卡片出错: {e}")
+                        print(f"处理位卡片出错: {e}")
                         continue
                 
                 if page_num >= self.max_pages:
@@ -239,9 +260,14 @@ class BossSpider:
                 # 翻页
                 try:
                     current_url = page.url
-                    next_url = (current_url + f'&page={page_num + 1}' 
-                              if 'page=' not in current_url 
-                              else current_url.replace(f'page={page_num}', f'page={page_num + 1}'))
+                    if 'page=' not in current_url:
+                        next_url = current_url + f'&page={page_num + 1}'
+                    else:
+                        next_url = current_url.replace(f'page={page_num}', f'page={page_num + 1}')
+                    
+                    # 确保 jobType 参数存在
+                    if 'jobType=1903' not in next_url:
+                        next_url += '&jobType=1903'
                     
                     print(f"正在跳转到第 {page_num + 1} 页...")
                     page.goto(next_url, wait_until='domcontentloaded', timeout=20000)
